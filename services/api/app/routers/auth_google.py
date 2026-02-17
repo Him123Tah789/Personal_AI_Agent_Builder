@@ -1,13 +1,18 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.core.crypto import encrypt
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.services.google_oauth import exchange_code_for_tokens, fetch_userinfo, expiry_from
-# Import models to use them (mock for MVP)
-# from app.db.models.user import User
+from app.db.models.user import User
+from app.db.models.org import Org
+from app.db.models.membership import Membership
+from app.db.models.integration_google import GoogleIntegration
+from app.db.models.audit_log import AuditLog
 
 router = APIRouter(prefix="/auth/google", tags=["auth"])
 
@@ -19,11 +24,10 @@ class GoogleCallbackIn(BaseModel):
 @router.post("/callback")
 async def google_callback(payload: GoogleCallbackIn, db: Session = Depends(get_db)):
     # 1) Exchange code -> tokens
-    try:
-        # Check if secrets are set
-        if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
-             raise HTTPException(status_code=500, detail="Google Client credentials not configured.")
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Google Client credentials not configured.")
 
+    try:
         token_data = await exchange_code_for_tokens(
             settings.GOOGLE_CLIENT_ID,
             settings.GOOGLE_CLIENT_SECRET,
@@ -32,7 +36,6 @@ async def google_callback(payload: GoogleCallbackIn, db: Session = Depends(get_d
             payload.code_verifier,
         )
     except Exception as e:
-        print(f"Error: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to exchange code: {str(e)}")
 
     access_token = token_data.get("access_token")
@@ -46,9 +49,9 @@ async def google_callback(payload: GoogleCallbackIn, db: Session = Depends(get_d
     # 2) Userinfo
     try:
         userinfo = await fetch_userinfo(access_token)
-    except Exception as e:
-         raise HTTPException(status_code=400, detail="Failed to fetch userinfo")
-         
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to fetch userinfo")
+
     email = userinfo.get("email")
     sub = userinfo.get("sub")
     name = userinfo.get("name")
@@ -57,22 +60,61 @@ async def google_callback(payload: GoogleCallbackIn, db: Session = Depends(get_d
     if not email or not sub:
         raise HTTPException(status_code=400, detail="Incomplete userinfo")
 
-    # 3) MVP: Create Org/User if not exists (Simplified for Blueprint)
-    # In a real implementation:
-    # user = crud.get_user_by_email(db, email)
-    # if not user: user = crud.create_user(...)
-    
-    # For now, we simulate success and return a JWT
-    org_id = "00000000-0000-0000-0000-000000000000" # Placeholder UUID
-    jwt_token = create_access_token(sub=email, org_id=org_id)
+    # 3) Upsert User + Org + Membership + GoogleIntegration
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(email=email, full_name=name, avatar_url=picture, last_login_at=datetime.now(timezone.utc))
+        db.add(user)
+        db.flush()
+        org = Org(name=payload.org_name or "Founder Org")
+        db.add(org)
+        db.flush()
+        db.add(Membership(org_id=org.id, user_id=user.id, role="OWNER"))
+        org_id = org.id
+    else:
+        user.full_name = name
+        user.avatar_url = picture
+        user.last_login_at = datetime.now(timezone.utc)
+        mem = db.query(Membership).filter(Membership.user_id == user.id).first()
+        if not mem:
+            org = Org(name=payload.org_name or "Founder Org")
+            db.add(org)
+            db.flush()
+            db.add(Membership(org_id=org.id, user_id=user.id, role="OWNER"))
+            org_id = org.id
+        else:
+            org_id = mem.org_id
 
-    # We would encrypt and store tokens here
-    # enc_access = encrypt(access_token)
-    
+    # 4) Upsert Google integration (encrypted tokens)
+    integ = db.query(GoogleIntegration).filter(
+        GoogleIntegration.org_id == org_id, GoogleIntegration.user_id == user.id
+    ).first()
+    if not integ:
+        integ = GoogleIntegration(
+            org_id=org_id,
+            user_id=user.id,
+            google_sub=sub,
+            scopes=scope,
+            access_token_enc=encrypt(access_token),
+            refresh_token_enc=encrypt(refresh_token) if refresh_token else None,
+            expiry=expiry_from(expires_in),
+        )
+        db.add(integ)
+    else:
+        integ.google_sub = sub
+        integ.scopes = scope
+        integ.access_token_enc = encrypt(access_token)
+        if refresh_token:
+            integ.refresh_token_enc = encrypt(refresh_token)
+        integ.expiry = expiry_from(expires_in)
+
+    # 5) Audit log
+    db.add(AuditLog(org_id=org_id, user_id=user.id, action="AUTH_GOOGLE_CONNECTED", meta={"scopes": scope}))
+    db.commit()
+
+    # 6) Return JWT
+    jwt_token = create_access_token(sub=email, org_id=str(org_id))
     return {
         "access_token": jwt_token,
         "user": {"email": email, "name": name, "picture": picture},
-        "scopes": scope,
-        "google_sub": sub,
-        "expires_at": expiry_from(expires_in).isoformat() if expires_in else None,
     }

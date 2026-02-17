@@ -1,9 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.routers import auth_google
-# Import other routers as they are rebuilt (commenting out explicitly)
-# from app.api.v1 import memory
+from app.routers import auth_google, gmail, calendar
 
 app = FastAPI(title="Jarvis MVP API")
 
@@ -16,7 +14,8 @@ app.add_middleware(
 )
 
 app.include_router(auth_google.router)
-# app.include_router(memory.router, prefix="/api/v1/memory", tags=["memory"])
+app.include_router(gmail.router)
+app.include_router(calendar.router)
 
 @app.get("/health")
 def health():

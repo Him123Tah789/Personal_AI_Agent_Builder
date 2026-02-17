@@ -1,25 +1,25 @@
-from sqlalchemy import Column, String, ForeignKey, DateTime, UniqueConstraint
+import uuid
+from sqlalchemy import String, DateTime, func, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
-from app.db.base_class import Base
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db.base import Base
 
-class IntegrationGoogle(Base):
+class GoogleIntegration(Base):
     __tablename__ = "integrations_google"
+    __table_args__ = (UniqueConstraint("org_id", "user_id", name="uq_google_org_user"),)
 
-    org_id = Column(UUID(as_uuid=True), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    
-    google_sub = Column(String, nullable=False)
-    scopes = Column(String, nullable=False)
-    access_token_enc = Column(String, nullable=False)
-    refresh_token_enc = Column(String, nullable=True)
-    expiry = Column(DateTime(timezone=True), nullable=True)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
-    org = relationship("Org", back_populates="integrations")
-    user = relationship("User", back_populates="integrations")
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint('org_id', 'user_id', name='unique_google_org_user'),
-    )
+    google_sub: Mapped[str] = mapped_column(String, nullable=False)
+    scopes: Mapped[str] = mapped_column(String, nullable=False)
+
+    access_token_enc: Mapped[str] = mapped_column(String, nullable=False)
+    refresh_token_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    expiry: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="google_integration")
